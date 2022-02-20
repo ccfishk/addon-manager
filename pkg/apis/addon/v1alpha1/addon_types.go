@@ -383,6 +383,11 @@ func (a *Addon) GetInstallStatus() ApplicationAssemblyPhase {
 	return a.Status.Lifecycle.Installed
 }
 
+// GetInstallStatus returns the install phase for addon
+func (a *Addon) GetPrereqStatus() ApplicationAssemblyPhase {
+	return a.Status.Lifecycle.Prereqs
+}
+
 // NotTriggered indicate the workflow not triggered
 // Pending,Running are triggered
 func (p ApplicationAssemblyPhase) NotTriggered() bool {
