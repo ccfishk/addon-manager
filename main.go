@@ -18,15 +18,21 @@ import (
 	"flag"
 	"os"
 
+	"golang.org/x/net/context"
+	"k8s.io/client-go/dynamic"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	wfv1 "github.com/argoproj/argo-workflows/v3/pkg/apis/workflow/v1alpha1"
+	addonmgrv1alpha1 "github.com/keikoproj/addon-manager/pkg/apis/addon/v1alpha1"
+
+	addonclientset "github.com/keikoproj/addon-manager/pkg/client/clientset/versioned"
+
 	"github.com/keikoproj/addon-manager/controllers"
 	"github.com/keikoproj/addon-manager/pkg/apis/addon"
-	addonmgrv1alpha1 "github.com/keikoproj/addon-manager/pkg/apis/addon/v1alpha1"
 	"github.com/keikoproj/addon-manager/pkg/common"
 	"github.com/keikoproj/addon-manager/pkg/version"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -52,7 +58,6 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(debug)))
 
 	setupLog.Info(version.ToString())
-
 	nonCached := []client.Object{
 		&wfv1.Workflow{},
 		&addonmgrv1alpha1.Addon{},
@@ -71,11 +76,32 @@ func main() {
 	}
 
 	stopChan := make(chan struct{})
-	_, err = controllers.New(mgr, stopChan)
-	if err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Addon")
-		os.Exit(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg, err := clientcmd.BuildConfigFromFlags("", "/Users/jiminh/.kube/config")
+	if cfg == nil {
+		panic(err)
 	}
+	dynCli, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		panic(err)
+	}
+	k8sCli, _ := common.NewK8sClient("/Users/jiminh/.kube/config")
+	addoncli, err := addonclientset.NewForConfig(cfg)
+	if err != nil {
+		panic(err)
+	}
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	namespace := "addon-manager-system"
+	//addonInformFactory := addonv1informers.NewSharedInformerFactory(addoncli, 0)
+	//addonlister := addonInformFactory.Addonmgr().V1alpha1().Addons().Lister()
+	config := controllers.NewConfig(namespace, 5, 5, 5, dynCli, k8sCli, mgr.GetClient(), mgr.GetScheme(), addoncli)
+	//addonInformFactory.Start(stopCh)
+	controllers.StartAddonController(ctx, config)
 
 	// +kubebuilder:scaffold:builder
 	setupLog.Info("starting manager")

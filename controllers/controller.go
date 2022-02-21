@@ -2,12 +2,14 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/sirupsen/logrus"
 
 	wfv1 "github.com/argoproj/argo-workflows/v3/pkg/apis/workflow/v1alpha1"
 	informers "github.com/argoproj/argo-workflows/v3/pkg/client/informers/externalversions"
@@ -16,6 +18,7 @@ import (
 	"github.com/keikoproj/addon-manager/pkg/apis/addon"
 	addonv1 "github.com/keikoproj/addon-manager/pkg/apis/addon/v1alpha1"
 	addonv1versioned "github.com/keikoproj/addon-manager/pkg/client/clientset/versioned"
+	"github.com/keikoproj/addon-manager/pkg/client/clientset/versioned/scheme"
 	addonv1informers "github.com/keikoproj/addon-manager/pkg/client/informers/externalversions"
 	addonv1listers "github.com/keikoproj/addon-manager/pkg/client/listers/addon/v1alpha1"
 	"github.com/keikoproj/addon-manager/pkg/common"
@@ -29,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers/internalinterfaces"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
@@ -37,6 +41,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	addonwfutility "github.com/keikoproj/addon-manager/pkg/workflows"
+
+	apiv1 "k8s.io/api/core/v1"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 const (
@@ -92,13 +99,14 @@ func (wfinfo *WfInformers) startAddonInformers(cfg *rest.Config) {
 	if addoncli == nil {
 		panic("addon cli is empty")
 	}
-	addonInformFactory := addonv1informers.NewSharedInformerFactory(addoncli, time.Second*30)
-	wfinfo.addonlister = addonInformFactory.Addonmgr().V1alpha1().Addons().Lister()
+	addonInformFactory := addonv1informers.NewSharedInformerFactory(addoncli, 0)
 	wfinfo.addonInformers = NewAddonInformer(wfinfo.dynClient, addon.ManagedNameSpace,
 		addon.AddonResyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
 		internalinterfaces.TweakListOptionsFunc(func(x *metav1.ListOptions) {
 		}),
 	)
+
+	wfinfo.addonlister = addonInformFactory.Addonmgr().V1alpha1().Addons().Lister()
 
 	go wfinfo.addonInformers.Run(wfinfo.stopCh)
 	addonInformFactory.Start(wfinfo.stopCh)
@@ -140,6 +148,7 @@ func (wfinfo *WfInformers) Start(ctx context.Context) error {
 	if ok := cache.WaitForCacheSync(wfinfo.stopCh, wfinfo.nsInformers.HasSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
+
 	<-wfinfo.stopCh
 	return nil
 }
@@ -329,4 +338,56 @@ func (wfinfo *WfInformers) delAddon(namespace, name string) error {
 	msg := fmt.Sprintf("\n Successfully deleting addon %s/%s\n", namespace, name)
 	fmt.Print(msg)
 	return nil
+}
+
+func WorkFlowFromUnstructured(un *unstructured.Unstructured) (*wfv1.Workflow, error) {
+	var wf wfv1.Workflow
+	err := FromUnstructuredObj(un, &wf)
+	return &wf, err
+}
+
+func FromUnstructured(un *unstructured.Unstructured) (*addonv1.Addon, error) {
+	var addon addonv1.Addon
+	err := FromUnstructuredObj(un, &addon)
+	return &addon, err
+}
+
+func FromUnstructuredObj(un *unstructured.Unstructured, v interface{}) error {
+	err := runtime.DefaultUnstructuredConverter.FromUnstructured(un.Object, v)
+	if err != nil {
+		if err.Error() == "cannot convert int64 to v1alpha1.AnyString" {
+			data, err := json.Marshal(un)
+			if err != nil {
+				return err
+			}
+			return json.Unmarshal(data, v)
+		}
+		return err
+	}
+	return nil
+}
+
+const defaultSpamBurst = 10000
+
+func CreateEventRecorder(namespace string, ks8cli kubernetes.Interface, logger *logrus.Entry) record.EventRecorder {
+	eventCorrelationOption := record.CorrelatorOptions{BurstSize: defaultSpamBurst}
+	eventBroadcaster := record.NewBroadcasterWithCorrelatorOptions(eventCorrelationOption)
+	eventBroadcaster.StartLogging(logger.Debugf)
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: ks8cli.CoreV1().Events(namespace)})
+	return eventBroadcaster.NewRecorder(scheme.Scheme, apiv1.EventSource{Component: "addon-manager-controller"})
+}
+
+// filter completed addons
+func UnstructuredHasCompletedLabel(obj interface{}) bool {
+	if un, ok := obj.(*unstructured.Unstructured); ok {
+		lifecycle, f, err := unstructured.NestedMap(un.UnstructuredContent(), "status", "lifecycle")
+		if err == nil && f {
+			// for updating/applying existing addons
+			if lifecycle["installed"] == "Succeeded" || lifecycle["installed"] == "Failed" {
+				return true
+			}
+			// check label : completed/true
+		}
+	}
+	return false
 }

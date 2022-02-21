@@ -16,4 +16,6 @@ const (
 	ManagedNameSpace string = "addon-manager-system"
 
 	AddonResyncPeriod = 20 * time.Minute
+
+	FinalizerName = "delete.addonmgr.keikoproj.io"
 )
