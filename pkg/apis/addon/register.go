@@ -18,4 +18,9 @@ const (
 	AddonResyncPeriod = 20 * time.Minute
 
 	FinalizerName = "delete.addonmgr.keikoproj.io"
+
+	ResourceDefaultManageByLabel = "app.kubernetes.io/managed-by"
+	ResourceDefaultManageByValue = "addonmgr.keikoproj.io"
+	ResourceDefaultOwnLabel      = "app.kubernetes.io/name"
+	ResourceDefaultPartLabel     = "app.kubernetes.io/part-of"
 )

@@ -17,14 +17,12 @@ import (
 	addonapiv1 "github.com/keikoproj/addon-manager/pkg/apis/addon"
 	addonv1 "github.com/keikoproj/addon-manager/pkg/apis/addon/v1alpha1"
 	addonv1versioned "github.com/keikoproj/addon-manager/pkg/client/clientset/versioned"
-	addonv1listers "github.com/keikoproj/addon-manager/pkg/client/listers/addon/v1alpha1"
 	"github.com/keikoproj/addon-manager/pkg/common"
 	"github.com/keikoproj/addon-manager/pkg/workflows"
 	addonwfutility "github.com/keikoproj/addon-manager/pkg/workflows"
 
 	"github.com/keikoproj/addon-manager/pkg/addon"
 
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -32,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/informers/internalinterfaces"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
@@ -55,11 +52,12 @@ type Event struct {
 
 // ResourceController object
 type ResourceController struct {
-	logger    *logrus.Entry
-	clientset kubernetes.Interface
-	queue     workqueue.RateLimitingInterface
-	informer  cache.SharedIndexInformer
-	dynCli    dynamic.Interface
+	logger     *logrus.Entry
+	clientset  kubernetes.Interface
+	queue      workqueue.RateLimitingInterface
+	informer   cache.SharedIndexInformer
+	wfinformer cache.SharedIndexInformer
+	dynCli     dynamic.Interface
 	//eventHandler handlers.Handler
 
 	Recorder      record.EventRecorder
@@ -67,24 +65,28 @@ type ResourceController struct {
 	Scheme        *runtime.Scheme
 
 	addoncli     addonv1versioned.Interface
-	addonlister  addonv1listers.AddonLister // should not use this any more
 	versionCache addon.VersionCacheClient
 }
 
 // Start prepares watchers and run their controllers, then waits for process termination signals
 func StartAddonController(ctx context.Context, config *Config) {
-	resource := schema.GroupVersionResource{
+
+	c := &ResourceController{}
+	c.logger = logrus.WithField("controllers", "watch-addon-workflow-resources")
+	c.queue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+
+	addresource := schema.GroupVersionResource{
 		Group:    addonapiv1.Group,
 		Version:  "v1alpha1",
 		Resource: addonapiv1.AddonPlural,
 	}
-	informer := cache.NewSharedIndexInformer(
+	c.informer = cache.NewSharedIndexInformer(
 		&cache.ListWatch{
-			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
-				return config.dynCli.Resource(resource).Namespace(config.namespace).List(ctx, options)
+			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+				return config.dynCli.Resource(addresource).Namespace(config.namespace).List(ctx, options)
 			},
-			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
-				return config.dynCli.Resource(resource).Namespace(config.namespace).Watch(ctx, options)
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				return config.dynCli.Resource(addresource).Namespace(config.namespace).Watch(ctx, options)
 			},
 		},
 		&unstructured.Unstructured{},
@@ -92,18 +94,39 @@ func StartAddonController(ctx context.Context, config *Config) {
 		cache.Indexers{},
 	)
 
-	c := newResourceController(config.dynCli, informer, "addon")
+	wfresource := schema.GroupVersionResource{
+		Group:    "argoproj.io",
+		Version:  "v1alpha1",
+		Resource: "workflows",
+	}
+	c.wfinformer = cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+				return config.dynCli.Resource(wfresource).Namespace(config.namespace).List(ctx, options)
+			},
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				return config.dynCli.Resource(wfresource).Namespace(config.namespace).Watch(ctx, options)
+			},
+		},
+		&unstructured.Unstructured{},
+		0, //Skip resync
+		cache.Indexers{},
+	)
+
 	c.Recorder = CreateEventRecorder(config.namespace, config.k8sCli, c.logger)
 	c.Scheme = config.Scheme
 	c.Client = config.Client
 	c.dynCli = config.dynCli
 	c.addoncli = config.Addoncli
 	c.versionCache = config.VersionCache
+
+	c.setupAddonInformerHandler(c.informer, c.queue, "addon")
+	c.setupWorkflowHandler(ctx, c.wfinformer)
+
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
 	go c.run(ctx, stopCh, config.addonworkers)
-	c.startWorkflowMonitor(ctx, stopCh, config)
 
 	sigterm := make(chan os.Signal, 1)
 	signal.Notify(sigterm, syscall.SIGTERM)
@@ -111,14 +134,7 @@ func StartAddonController(ctx context.Context, config *Config) {
 	<-sigterm
 }
 
-func (c *ResourceController) startWorkflowMonitor(ctx context.Context, stop <-chan struct{}, config *Config) {
-	// start workflow event monitor
-	wfsharedInforms := NewWorkflowInformer(config.dynCli, config.namespace, workflowResyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		internalinterfaces.TweakListOptionsFunc(func(x *metav1.ListOptions) {
-			r := InstanceIDRequirement("addon-manager-workflow-controller")
-			x.LabelSelector = r.String()
-		}),
-	)
+func (c *ResourceController) setupWorkflowHandler(ctx context.Context, wfsharedInforms cache.SharedIndexInformer) {
 	wfsharedInforms.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			UpdateFunc: func(oldObj, newObj interface{}) {
@@ -130,12 +146,9 @@ func (c *ResourceController) startWorkflowMonitor(ctx context.Context, stop <-ch
 			},
 		},
 	)
-	go wfsharedInforms.Run(stop)
-	fmt.Printf("\n workflow event trigger update. addon status \n")
 }
 
-func newResourceController(dynCli dynamic.Interface, informer cache.SharedIndexInformer, resourceType string) *ResourceController {
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+func (c *ResourceController) setupAddonInformerHandler(informer cache.SharedIndexInformer, queue workqueue.RateLimitingInterface, resourceType string) {
 	var newEvent Event
 	var err error
 
@@ -168,8 +181,7 @@ func newResourceController(dynCli dynamic.Interface, informer cache.SharedIndexI
 				newEvent.key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 				newEvent.eventType = "delete"
 
-				//newEvent.namespace = utils.GetObjectMetaData(obj).Namespace
-				logrus.WithField("pkg", "resource-"+resourceType).Infof("Processing delete to %v: %s", resourceType, newEvent.key)
+				logrus.WithField("pkg", "resource-"+resourceType).Infof("Processing non-completed delete to %v: %s", resourceType, newEvent.key)
 				if err == nil {
 					queue.Add(newEvent)
 				}
@@ -180,17 +192,16 @@ func newResourceController(dynCli dynamic.Interface, informer cache.SharedIndexI
 		DeleteFunc: func(obj interface{}) {
 			addon, ok := obj.(*unstructured.Unstructured)
 			if ok {
-				cache.DeletionHandlingMetaNamespaceKeyFunc(addon)
+				newEvent.key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(addon)
+				newEvent.eventType = "delete"
+				logrus.WithField("pkg", "resource-"+resourceType).Infof("Processing completed resource delete to %v: %s", resourceType, newEvent.key)
+				if err == nil {
+					queue.Add(newEvent)
+				}
+
 			}
 		},
 	})
-
-	return &ResourceController{
-		logger:   logrus.WithField("pkg", "resource-"+resourceType),
-		dynCli:   dynCli,
-		informer: informer,
-		queue:    queue,
-	}
 }
 
 // Run starts the resource controller
@@ -202,6 +213,7 @@ func (c *ResourceController) run(ctx context.Context, stopCh <-chan struct{}, wo
 	serverStartTime = time.Now().Local()
 
 	go c.informer.Run(stopCh)
+	go c.wfinformer.Run(stopCh)
 
 	if !cache.WaitForCacheSync(stopCh, c.HasSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
@@ -260,8 +272,8 @@ func (c *ResourceController) processNextItem() bool {
 func (c *ResourceController) processItem(ctx context.Context, newEvent Event) error {
 	obj, exists, err := c.informer.GetIndexer().GetByKey(newEvent.key)
 	if err != nil {
-		msg := fmt.Sprintf("\n failed fetching key %s from cache, err %v \n", newEvent.key, err)
-		fmt.Print(msg)
+		msg := fmt.Sprintf("failed fetching key %s from cache, err %v ", newEvent.key, err)
+		c.logger.Error(msg)
 		return fmt.Errorf(msg)
 	} else if !exists {
 		msg := fmt.Sprintf("\n obj %s does not exist \n", newEvent.key)
@@ -296,13 +308,11 @@ func (c *ResourceController) handleCreation(ctx context.Context, instance *addon
 
 	var wfl = workflows.NewWorkflowLifecycle(c.Client, c.dynCli, instance, c.Scheme, c.Recorder)
 
-	// Process addon instance
 	procErr := c.createAddon(ctx, instance, wfl)
 	if procErr != nil {
 		return procErr
 	}
 
-	// Always update cache, status except errors
 	c.addAddonToCache(instance)
 
 	return nil

@@ -83,6 +83,13 @@ func main() {
 	if cfg == nil {
 		panic(err)
 	}
+
+	// config, err := rest.InClusterConfig()
+	// if err != nil {
+	// 	setupLog.Error(err, "unable to connect to client")
+	// 	os.Exit(1)
+	// }
+
 	dynCli, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		panic(err)
@@ -97,10 +104,7 @@ func main() {
 	defer close(stopCh)
 
 	namespace := "addon-manager-system"
-	//addonInformFactory := addonv1informers.NewSharedInformerFactory(addoncli, 0)
-	//addonlister := addonInformFactory.Addonmgr().V1alpha1().Addons().Lister()
 	config := controllers.NewConfig(namespace, 5, 5, 5, dynCli, k8sCli, mgr.GetClient(), mgr.GetScheme(), addoncli)
-	//addonInformFactory.Start(stopCh)
 	controllers.StartAddonController(ctx, config)
 
 	// +kubebuilder:scaffold:builder
