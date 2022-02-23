@@ -23,4 +23,6 @@ const (
 	ResourceDefaultManageByValue = "addonmgr.keikoproj.io"
 	ResourceDefaultOwnLabel      = "app.kubernetes.io/name"
 	ResourceDefaultPartLabel     = "app.kubernetes.io/part-of"
+
+	TTL = time.Duration(3) * time.Hour // 1 hour
 )

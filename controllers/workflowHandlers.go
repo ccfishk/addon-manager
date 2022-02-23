@@ -4,22 +4,20 @@ import (
 	"context"
 	"fmt"
 
-	wfv1 "github.com/argoproj/argo-workflows/v3/pkg/apis/workflow/v1alpha1"
+	"github.com/keikoproj/addon-manager/pkg/common"
 	addonwfutility "github.com/keikoproj/addon-manager/pkg/workflows"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func (c *Controller) handleWorkFlowUpdate(ctx context.Context, obj interface{}) error {
-	fmt.Printf("\n yes, detect wf update \n")
+	c.logger.Info("workflow update")
 
-	if err := addonwfutility.IsValidV1WorkFlow(obj); err != nil {
-		msg := fmt.Sprintf("\n### error not an expected workflow object %#v", err)
+	wfobj, err := common.WorkFlowFromUnstructured(obj.(*unstructured.Unstructured))
+	if err != nil {
+		msg := fmt.Sprintf("converting to workflow object err %#v", err)
 		c.logger.Info(msg)
 		return fmt.Errorf(msg)
 	}
-	wfobj := &wfv1.Workflow{}
-	_ = runtime.DefaultUnstructuredConverter.FromUnstructured(obj.(*unstructured.Unstructured).UnstructuredContent(), wfobj)
 
 	// check the associated addons and update its status
 	msg := fmt.Sprintf("workflow %s/%s update status.phase %s", wfobj.GetNamespace(), wfobj.GetName(), wfobj.Status.Phase)
@@ -52,15 +50,12 @@ func (c *Controller) handleWorkFlowUpdate(ctx context.Context, obj interface{}) 
 }
 
 func (c *Controller) handleWorkFlowAdd(ctx context.Context, obj interface{}) error {
-	fmt.Printf("\n yes, detect wf add \n")
-
-	if err := addonwfutility.IsValidV1WorkFlow(obj); err != nil {
-		msg := fmt.Sprintf("\n### error not an expected workflow object %#v", err)
+	wfobj, err := common.WorkFlowFromUnstructured(obj.(*unstructured.Unstructured))
+	if err != nil {
+		msg := fmt.Sprintf("\n### converting to workflow object %#v", err)
 		c.logger.Info(msg)
 		return fmt.Errorf(msg)
 	}
-	wfobj := &wfv1.Workflow{}
-	_ = runtime.DefaultUnstructuredConverter.FromUnstructured(obj.(*unstructured.Unstructured).UnstructuredContent(), wfobj)
 
 	// check the associated addons and update its status
 	msg := fmt.Sprintf("workflow %s/%s update status.phase %s", wfobj.GetNamespace(), wfobj.GetName(), wfobj.Status.Phase)
@@ -91,9 +86,7 @@ func (c *Controller) handleWorkFlowAdd(ctx context.Context, obj interface{}) err
 }
 
 func (c *Controller) handleWorkFlowDelete(ctx context.Context, newEvent Event) error {
-	fmt.Printf("\n yes, detect wf deletion \n")
 	key := newEvent.key
-	fmt.Printf("\n looking for key %s\n", key)
 	item, found, err := c.wfinformer.GetIndexer().GetByKey(newEvent.key)
 	if err != nil {
 		msg := fmt.Sprintf("retrieving wf %s err %v", key, err)
@@ -104,7 +97,6 @@ func (c *Controller) handleWorkFlowDelete(ctx context.Context, newEvent Event) e
 		fmt.Print(msg)
 		return fmt.Errorf(msg)
 	}
-	wf := item.(*unstructured.Unstructured)
-	fmt.Printf("\n wf %s %s\n", wf.GetNamespace(), wf.GetName())
+	_, _ = item.(*unstructured.Unstructured)
 	return nil
 }

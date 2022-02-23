@@ -2,9 +2,7 @@ package controllers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +12,7 @@ import (
 
 	addonapiv1 "github.com/keikoproj/addon-manager/pkg/apis/addon"
 	addonv1versioned "github.com/keikoproj/addon-manager/pkg/client/clientset/versioned"
+	"github.com/keikoproj/addon-manager/pkg/utils"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -26,8 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
@@ -74,25 +73,20 @@ type Controller struct {
 // Start prepares watchers and run their controllers, then waits for process termination signals
 func Start() {
 
-	// if _, err := rest.InClusterConfig(); err != nil {
-	// 	kubeClient = utils.GetClientOutOfCluster()
-	// } else {
-	// 	kubeClient = utils.GetClient()
-	// }
-	cfg, err := clientcmd.BuildConfigFromFlags("", "/Users/jiminh/.kube/config")
+	var kubeClient kubernetes.Interface
+	var cfg *rest.Config
+	cfg, err := rest.InClusterConfig()
 	if err != nil {
-		panic(err)
+		kubeClient = utils.GetClientOutOfCluster()
+	} else {
+		kubeClient = utils.GetClient()
 	}
+
 	dynCli, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		panic(err)
 	}
 	ctx := context.TODO()
-
-	kubeClient, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		panic(err)
-	}
 
 	namespace := "addon-manager-system"
 	addoncli := common.NewAddonClient(cfg)
@@ -118,24 +112,6 @@ func Start() {
 	wfcli := common.NewWFClient(cfg)
 	workflowResyncPeriod := 20 * time.Minute
 	wfinformer := NewWorkflowInformer(dynCli, namespace, workflowResyncPeriod, cache.Indexers{}, tweakListOptions)
-	// wfresource := schema.GroupVersionResource{
-	// 	Group:    "argoproj.io",
-	// 	Version:  "v1alpha1",
-	// 	Resource: "workflows",
-	// }
-	// wfinformer := cache.NewSharedIndexInformer(
-	// 	&cache.ListWatch{
-	// 		ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
-	// 			return dynCli.Resource(wfresource).Namespace("addon-manager-system").List(ctx, options)
-	// 		},
-	// 		WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
-	// 			return dynCli.Resource(wfresource).Namespace("addon-manager-system").Watch(ctx, options)
-	// 		},
-	// 	},
-	// 	&unstructured.Unstructured{},
-	// 	0, //Skip resync
-	// 	cache.Indexers{},
-	// )
 
 	// addon resources namespace informers
 	nsinformer := cache.NewSharedIndexInformer(
@@ -170,7 +146,7 @@ func Start() {
 		cache.Indexers{},
 	)
 
-	c := newResourceController2(kubeClient, dynCli, addoncli, wfcli, informer, wfinformer, nsinformer, deploymentinformer, "addon", "addon-manager-system")
+	c := newResourceController(kubeClient, dynCli, addoncli, wfcli, informer, wfinformer, nsinformer, deploymentinformer, "addon", "addon-manager-system")
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
@@ -182,7 +158,7 @@ func Start() {
 	<-sigterm
 }
 
-func newResourceController2(kubeClient kubernetes.Interface, dynCli dynamic.Interface, addoncli addonv1versioned.Interface, wfcli wfclientset.Interface, informer, wfinformer, nsinformer, deploymentinformer cache.SharedIndexInformer, resourceType, namespace string) *Controller {
+func newResourceController(kubeClient kubernetes.Interface, dynCli dynamic.Interface, addoncli addonv1versioned.Interface, wfcli wfclientset.Interface, informer, wfinformer, nsinformer, deploymentinformer cache.SharedIndexInformer, resourceType, namespace string) *Controller {
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 	var newEvent Event
 	var err error
@@ -192,7 +168,7 @@ func newResourceController2(kubeClient kubernetes.Interface, dynCli dynamic.Inte
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
 			newEvent.eventType = "create"
 
-			logrus.WithField("pkg", "addon-controllers-addon").Infof("Processing add to %v: %s", resourceType, newEvent.key)
+			logrus.WithField("controllers", "addon").Infof("Processing add to %v: %s", resourceType, newEvent.key)
 			if err == nil {
 				queue.Add(newEvent)
 			}
@@ -201,7 +177,7 @@ func newResourceController2(kubeClient kubernetes.Interface, dynCli dynamic.Inte
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(old)
 			newEvent.eventType = "update"
 
-			logrus.WithField("pkg", "addon-controllers-addon").Infof("Processing update to %v: %s", resourceType, newEvent.key)
+			logrus.WithField("controllers", "addon").Infof("Processing update to %v: %s", resourceType, newEvent.key)
 			if err == nil {
 				queue.Add(newEvent)
 			}
@@ -211,7 +187,7 @@ func newResourceController2(kubeClient kubernetes.Interface, dynCli dynamic.Inte
 			newEvent.eventType = "delete"
 
 			//newEvent.namespace = utils.GetObjectMetaData(obj).Namespace
-			logrus.WithField("pkg", "addon-controllers-"+resourceType).Infof("Processing delete to %v: %s", resourceType, newEvent.key)
+			logrus.WithField("controllers", "addon-"+resourceType).Infof("Processing delete to %v: %s", resourceType, newEvent.key)
 			if err == nil {
 				queue.Add(newEvent)
 			}
@@ -219,7 +195,7 @@ func newResourceController2(kubeClient kubernetes.Interface, dynCli dynamic.Inte
 	})
 
 	return &Controller{
-		logger:             logrus.WithField("pkg", "addon-controllers-"+resourceType),
+		logger:             logrus.WithField("controllers", "-"+resourceType),
 		clientset:          kubeClient,
 		dynCli:             dynCli,
 		addoncli:           addoncli,
@@ -243,24 +219,16 @@ func (c *Controller) setupwfhandlers(ctx context.Context, wfinformer cache.Share
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
 			newEvent.eventType = "create"
 
-			logrus.WithField("pkg", "addon-controllers-wf").Infof("Processing add to %v: %s", resourceType, newEvent.key)
+			logrus.WithField("controllers", "wf").Infof("Processing add to %v: %s", resourceType, newEvent.key)
 			c.handleWorkFlowAdd(ctx, obj)
 		},
 		UpdateFunc: func(old, new interface{}) {
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(old)
 			newEvent.eventType = "update"
 
-			logrus.WithField("pkg", "addon-controllers-wf").Infof("Processing update to %v: %s", resourceType, newEvent.key)
-			workflow, ok := new.(*unstructured.Unstructured).Object["status"]
-			if ok {
-				wfJson, err := json.Marshal(workflow)
-				if err != nil {
-					log.Println("err", err)
-					return
-				}
-				fmt.Println("sending workflow update event  ", string(wfJson))
-				c.handleWorkFlowUpdate(ctx, old)
-			}
+			logrus.WithField("controllers", "wf").Infof("Processing update to %v: %s", resourceType, newEvent.key)
+			c.handleWorkFlowUpdate(ctx, new)
+
 		},
 		DeleteFunc: func(obj interface{}) {
 			newEvent.key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
@@ -279,9 +247,8 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 	nsinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
-			newEvent.eventType = "create"
 
-			logrus.WithField("pkg", "addon-controllers").Infof("Processing add to %v: %s", resourceType, newEvent.key)
+			logrus.WithField("controllers", "namespace").Infof("Processing add to %v: %s", resourceType, newEvent.key)
 			c.handleNamespaceAdd(ctx, obj)
 
 		},
@@ -289,7 +256,7 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(old)
 			newEvent.eventType = "update"
 
-			logrus.WithField("pkg", "addon-controllers-wf").Infof("Processing update to %v: %s", resourceType, newEvent.key)
+			logrus.WithField("controllers", "namespace").Infof("Processing update to %v: %s", resourceType, newEvent.key)
 			c.handleNamespaceUpdate(ctx, new)
 
 		},
@@ -306,7 +273,7 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
 			newEvent.eventType = "create"
 
-			logrus.WithField("pkg", "addon-controllers-wf").Infof("Processing add to %v: %s", resourceType, newEvent.key)
+			logrus.WithField("controllers", "deployment").Infof("Processing add to %v: %s", resourceType, newEvent.key)
 			c.handleDeploymentAdd(ctx, obj)
 
 		},
@@ -314,7 +281,7 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(old)
 			newEvent.eventType = "update"
 
-			logrus.WithField("pkg", "addon-controllers-wf").Infof("Processing update to %v: %s", resourceType, newEvent.key)
+			logrus.WithField("controllers", "deployment").Infof("Processing update to %v: %s", resourceType, newEvent.key)
 			c.handleDeploymentUpdate(ctx, new)
 
 		},
@@ -369,21 +336,24 @@ func (c *Controller) LastSyncResourceVersion() string {
 }
 
 func (c *Controller) runWorker() {
-	for c.processNextItem() {
+	defer utilruntime.HandleCrash()
+
+	ctx := context.Background()
+	for c.processNextItem(ctx) {
 		// continue looping
 	}
 }
 
-func (c *Controller) processNextItem() bool {
+func (c *Controller) processNextItem(ctx context.Context) bool {
 	newEvent, quit := c.queue.Get()
-
 	if quit {
+		c.logger.Debugf("received shutdown message.")
 		return false
 	}
 	defer c.queue.Done(newEvent)
-	err := c.processItem(newEvent.(Event))
+
+	err := c.processItem(ctx, newEvent.(Event))
 	if err == nil {
-		// No error, reset the ratelimit counters
 		c.queue.Forget(newEvent)
 	} else if c.queue.NumRequeues(newEvent) < maxRetries {
 		c.logger.Errorf("Error processing %s (will retry): %v", newEvent.(Event).key, err)
@@ -398,23 +368,22 @@ func (c *Controller) processNextItem() bool {
 	return true
 }
 
-func (c *Controller) processItem(newEvent Event) error {
-	ctx := context.TODO()
+func (c *Controller) processItem(ctx context.Context, newEvent Event) error {
 	obj, exists, err := c.informer.GetIndexer().GetByKey(newEvent.key)
 	if err != nil {
-		msg := fmt.Sprintf("##### failed fetching key %s from cache, err %v ", newEvent.key, err)
+		msg := fmt.Sprintf("failed fetching key %s from cache, err %v ", newEvent.key, err)
 		c.logger.Error(msg)
 		return fmt.Errorf(msg)
 	} else if !exists {
-		msg := fmt.Sprintf("##### obj %s does not exist \n", newEvent.key)
-		fmt.Print(msg)
+		msg := fmt.Sprintf("obj %s does not exist", newEvent.key)
+		c.logger.Error(msg)
 		return fmt.Errorf(msg)
 	}
 
 	addon, err := common.FromUnstructured(obj.(*unstructured.Unstructured))
 	if err != nil {
-		msg := fmt.Sprintf("##### obj %s is not addon, err %v", newEvent.key, err)
-		fmt.Print(msg)
+		msg := fmt.Sprintf("obj %s is not addon, err %v", newEvent.key, err)
+		c.logger.Error(msg)
 		return fmt.Errorf(msg)
 	}
 

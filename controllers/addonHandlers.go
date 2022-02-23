@@ -14,42 +14,103 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	addoninternal "github.com/keikoproj/addon-manager/pkg/addon"
-)
-
-const (
-	finalizerName = "delete.addonmgr.keikoproj.io"
+	addonapiv1 "github.com/keikoproj/addon-manager/pkg/apis/addon"
 )
 
 func (c *Controller) handleAddonCreation(ctx context.Context, addon *addonv1.Addon) error {
 	c.logger.Info("creating addon ", addon.Namespace, "/", addon.Name)
 
+	// validation
+	// setfinalizer
 	var wfl = workflows.NewWorkflowLifecycle(c.wfcli, c.informer, c.dynCli, addon, c.scheme, c.recorder)
-	//fmt.Printf("testing workflow %v", wfl)
-	procErr := c.createAddon(ctx, addon, wfl)
-	if procErr != nil {
-		return procErr
+
+	err := c.createAddon(ctx, addon, wfl)
+	if err != nil {
+		c.logger.Error("failed creating addon err %v", err)
+		return err
 	}
 
 	c.addAddonToCache(addon)
 
+	err = c.updateAddon(ctx, addon)
+	if err != nil {
+		c.logger.Error(err)
+		return err
+	}
 	return nil
 }
 
 func (c *Controller) handleAddonUpdate(ctx context.Context, addon *addonv1.Addon) error {
-	c.logger.Info("updating addon %s/%s", addon.Namespace, addon.Name)
+	c.logger.Info("updating addon ", addon.Namespace, "/", addon.Name)
+
+	if !addon.ObjectMeta.DeletionTimestamp.IsZero() {
+		var wfl = workflows.NewWorkflowLifecycle(c.wfcli, c.informer, c.dynCli, addon, c.scheme, c.recorder)
+
+		err := c.Finalize(ctx, addon, wfl, addonapiv1.FinalizerName)
+		if err != nil {
+			reason := fmt.Sprintf("Addon %s/%s could not be finalized. err %v", addon.Namespace, addon.Name, err)
+			c.recorder.Event(addon, "Warning", "Failed", reason)
+			addon.Status.Lifecycle.Installed = addonv1.DeleteFailed
+			addon.Status.Reason = reason
+			c.logger.Error(reason)
+			return fmt.Errorf(reason)
+		}
+
+		// For a better user experience we want to update the status and requeue
+		if addon.Status.Lifecycle.Installed != addonv1.Deleting {
+			addon.Status.Lifecycle.Installed = addonv1.Deleting
+			err := c.updateAddon(ctx, addon)
+			c.logger.Error("failed updating ", addon.Namespace, "/", addon.Name, " deleting status ", err)
+			return err
+		}
+	}
+
+	// Check if addon installation expired.
+	if addon.Status.Lifecycle.Installed == addonv1.Pending && common.IsExpired(addon.Status.StartTime, addonapiv1.TTL.Milliseconds()) {
+		reason := fmt.Sprintf("Addon %s/%s ttl expired, starttime exceeded %s", addon.Namespace, addon.Name, addonapiv1.TTL.String())
+		c.recorder.Event(addon, "Warning", "Failed", reason)
+		err := fmt.Errorf(reason)
+		c.logger.Error(err, reason)
+
+		addon.Status.Lifecycle.Installed = addonv1.Failed
+		addon.Status.Reason = reason
+		err = c.updateAddon(ctx, addon)
+		c.logger.Error("failed updating ", addon.Namespace, "/", addon.Name, " ttl expire status ", err)
+		return err
+	}
+
 	return nil
 }
 
 func (c *Controller) handleAddonDeletion(ctx context.Context, addon *addonv1.Addon) error {
 	c.logger.Info("deleting addon ", addon.Namespace, "/", addon.Name)
+	if !addon.ObjectMeta.DeletionTimestamp.IsZero() {
+		var wfl = workflows.NewWorkflowLifecycle(c.wfcli, c.informer, c.dynCli, addon, c.scheme, c.recorder)
+
+		err := c.Finalize(ctx, addon, wfl, addonapiv1.FinalizerName)
+		if err != nil {
+			reason := fmt.Sprintf("Addon %s/%s could not be finalized. %v", addon.Namespace, addon.Name, err)
+			c.recorder.Event(addon, "Warning", "Failed", reason)
+			addon.Status.Lifecycle.Installed = addonv1.DeleteFailed
+			addon.Status.Reason = reason
+			c.logger.Error(err, "Failed to finalize addon.")
+			return fmt.Errorf(reason)
+		}
+
+		// For a better user experience we want to update the status and requeue
+		if addon.Status.Lifecycle.Installed != addonv1.Deleting {
+			addon.Status.Lifecycle.Installed = addonv1.Deleting
+			err := c.updateAddon(ctx, addon)
+			c.logger.Error("failed updating ", addon.Namespace, "/", addon.Name, " deleting status ", err)
+			return err
+		}
+	}
 	return nil
 }
 
 func (c *Controller) updateAddonStatus(namespace, name, lifecycle string, lifecyclestatus wfv1.WorkflowPhase) error {
-	msg := fmt.Sprintf("updating addon %s/%s step %s status to %s\n", namespace, name, lifecycle, lifecyclestatus)
-	c.logger.Info(msg)
+	c.logger.Info("updating addon ", namespace, "/", name, " ", lifecycle, " status to ", lifecyclestatus)
 
-	//addonobj, err := c.addonlister.Addons(namespace).Get(name)
 	key := fmt.Sprintf("%s/%s", namespace, name)
 	obj, exists, err := c.informer.GetIndexer().GetByKey(key)
 	if err != nil || !exists {
@@ -67,7 +128,7 @@ func (c *Controller) updateAddonStatus(namespace, name, lifecycle string, lifecy
 	updating := addonobj.DeepCopy()
 	prevStatus := addonobj.Status
 	cycle := prevStatus.Lifecycle
-	msg = fmt.Sprintf("addon %s/%s cycle %v", updating.Namespace, updating.Name, cycle)
+	msg := fmt.Sprintf("addon %s/%s cycle %v", updating.Namespace, updating.Name, cycle)
 	c.logger.Info(msg)
 
 	newStatus := addonv1.AddonStatus{
@@ -92,49 +153,24 @@ func (c *Controller) updateAddonStatus(namespace, name, lifecycle string, lifecy
 		return nil
 	}
 	updating.Status = newStatus
-	updated, err := c.addoncli.AddonmgrV1alpha1().Addons(updating.Namespace).UpdateStatus(context.Background(), updating,
+	_, err = c.addoncli.AddonmgrV1alpha1().Addons(updating.Namespace).UpdateStatus(context.Background(), updating,
 		metav1.UpdateOptions{})
 	if err != nil {
 		msg := fmt.Sprintf("Addon %s/%s status could not be updated. %v", updating.Namespace, updating.Name, err)
 		fmt.Print(msg)
 	}
-	cycle = updated.Status.Lifecycle
-	msg = fmt.Sprintf("addon %s/%s updated cycle %v", updating.Namespace, updating.Namespace, cycle)
-	c.logger.Info(msg)
-
-	if lifecycle == "delete" && updating.Status.Lifecycle.Installed.Completed() {
-		//delAddon(updating.Namespace, updating.Namespace)
-	}
-
 	msg = fmt.Sprintf("successfully update addon %s/%s step %s status to %s", namespace, name, lifecycle, lifecyclestatus)
 	c.logger.Info(msg)
 	return nil
 }
 
-func (c *Controller) createAddon(ctx context.Context, instance *addonv1.Addon, wfl workflows.AddonLifecycle) error {
+func (c *Controller) createAddon(ctx context.Context, addon *addonv1.Addon, wfl workflows.AddonLifecycle) error {
 
 	errors := []error{}
-	// Validate it is our addon with our app label
 
-	// Set finalizer only after addon is valid
-	if err := c.SetFinalizer(ctx, instance, finalizerName); err != nil {
-		reason := fmt.Sprintf("Addon %s/%s could not add finalizer. %v", instance.Namespace, instance.Name, err)
-		c.recorder.Event(instance, "Warning", "Failed", reason)
-		c.logger.Error(err, "Failed to add finalizer for addon.")
-		instance.Status.Lifecycle.Installed = addonv1.Failed
-		instance.Status.Reason = reason
-		if err := c.updateAddon(instance); err != nil {
-			fmt.Printf("failed setting finalizer, err ", err)
-			panic(err)
-		}
-		return err
-	}
-	// Record successful validation
-	c.recorder.Event(instance, "Normal", "Completed", fmt.Sprintf("setup addon %s/%s finalizer.", instance.Namespace, instance.Name))
-
-	_, instance.Status.Checksum = c.validateChecksum(instance)
-	fmt.Printf("\n addon %s/%s spec configure checksum \n", instance.Namespace, instance.Name)
-	instance.Status = addonv1.AddonStatus{
+	_, addon.Status.Checksum = c.validateChecksum(addon)
+	c.logger.Info(" init addon ", addon.Namespace, "/", addon.Name, " status")
+	addon.Status = addonv1.AddonStatus{
 		StartTime: common.GetCurretTimestamp(),
 		Lifecycle: addonv1.AddonStatusLifecycle{
 			Prereqs:   "",
@@ -144,51 +180,67 @@ func (c *Controller) createAddon(ctx context.Context, instance *addonv1.Addon, w
 		Resources: make([]addonv1.ObjectStatus, 0),
 	}
 
-	err := c.executePrereqAndInstall(ctx, instance, wfl)
-	if err != nil {
-		fmt.Printf("\n failed installing addon %s/%s prereqs and instll err %v\n", instance.Namespace, instance.Name, err)
-		errors = append(errors, err)
+	// Set finalizer only after addon is valid
+	if err := c.SetFinalizer(ctx, addon, addonapiv1.FinalizerName); err != nil {
+		reason := fmt.Sprintf("Addon %s/%s could not add finalizer. %v", addon.Namespace, addon.Name, err)
+		c.recorder.Event(addon, "Warning", "Failed", reason)
+		c.logger.Error(reason)
+		addon.Status.Lifecycle.Installed = addonv1.Failed
+		addon.Status.Reason = reason
+		err := c.updateAddon(ctx, addon)
+		if err != nil {
+			msg := fmt.Sprintf("Failed updating %s/%s finalizer error status %v", addon.Namespace, addon.Name, err)
+			c.logger.Info(msg)
+			return fmt.Errorf(msg)
+		}
 	}
 
-	c.recorder.Event(instance, "Normal", "Completed", fmt.Sprintf("Addon %s/%s workflow is executed.", instance.Namespace, instance.Name))
-	fmt.Printf("\n either workflow update my status or my installation timeout after re-queue.\n")
+	err := c.executePrereqAndInstall(ctx, addon, wfl)
+	if err != nil {
+		msg := fmt.Sprintf("\n failed installing addon %s/%s prereqs and instll err %v\n", addon.Namespace, addon.Name, err)
+		c.logger.Error(msg)
+		errors = append(errors, err)
+	} else {
+		c.recorder.Event(addon, "Normal", "Completed", fmt.Sprintf("Addon %s/%s workflow is executed.", addon.Namespace, addon.Name))
+		c.logger.Info("workflow installation completed. waiting for update.")
+		return nil
+	}
 
-	return nil
+	msg := fmt.Sprintf("failed install %s/%s err %v", addon.Namespace, addon.Name, errors)
+	c.logger.Error(msg)
+	return fmt.Errorf(msg)
 }
 
-func (c *Controller) executePrereqAndInstall(ctx context.Context, instance *addonv1.Addon, wfl workflows.AddonLifecycle) error {
+func (c *Controller) executePrereqAndInstall(ctx context.Context, addon *addonv1.Addon, wfl workflows.AddonLifecycle) error {
 
-	prereqsPhase, err := c.runWorkflow(addonv1.Prereqs, instance, wfl)
+	prereqsPhase, err := c.runWorkflow(addonv1.Prereqs, addon, wfl)
 	if err != nil {
-		reason := fmt.Sprintf("Addon %s/%s prereqs failed. %v", instance.Namespace, instance.Name, err)
-		c.recorder.Event(instance, "Warning", "Failed", reason)
+		reason := fmt.Sprintf("Addon %s/%s prereqs failed. %v", addon.Namespace, addon.Name, err)
+		c.recorder.Event(addon, "Warning", "Failed", reason)
 		c.logger.Error(err, "Addon prereqs workflow failed.")
 		// if prereqs failed, set install status to failed as well so that STATUS is updated
-		instance.Status.Lifecycle.Installed = addonv1.Failed
-		instance.Status.Reason = reason
-		fmt.Printf("\n addon %s/%s prereq failed %v \n", instance.Namespace, instance.Name, err)
+		addon.Status.Lifecycle.Installed = addonv1.Failed
+		addon.Status.Reason = reason
 		return err
 	}
-	instance.Status.Lifecycle.Prereqs = prereqsPhase
+	addon.Status.Lifecycle.Prereqs = prereqsPhase
 
-	if err := c.validateSecrets(ctx, instance); err != nil {
-		reason := fmt.Sprintf("Addon %s/%s could not validate secrets. %v", instance.Namespace, instance.Name, err)
-		c.recorder.Event(instance, "Warning", "Failed", reason)
+	if err := c.validateSecrets(ctx, addon); err != nil {
+		reason := fmt.Sprintf("Addon %s/%s could not validate secrets. %v", addon.Namespace, addon.Name, err)
+		c.recorder.Event(addon, "Warning", "Failed", reason)
 		c.logger.Error(err, "Addon could not validate secrets.")
-		instance.Status.Lifecycle.Installed = addonv1.Failed
-		instance.Status.Reason = reason
-		fmt.Printf("\n addon %s/%s secret validation failed %v \n", instance.Namespace, instance.Name, err)
+		addon.Status.Lifecycle.Installed = addonv1.Failed
+		addon.Status.Reason = reason
 		return err
 	}
 
-	phase, err := c.runWorkflow(addonv1.Install, instance, wfl)
-	instance.Status.Lifecycle.Installed = phase
+	phase, err := c.runWorkflow(addonv1.Install, addon, wfl)
+	addon.Status.Lifecycle.Installed = phase
 	if err != nil {
-		reason := fmt.Sprintf("Addon %s/%s could not be installed due to error. %v", instance.Namespace, instance.Name, err)
-		c.recorder.Event(instance, "Warning", "Failed", reason)
+		reason := fmt.Sprintf("Addon %s/%s could not be installed due to error. %v", addon.Namespace, addon.Name, err)
+		c.recorder.Event(addon, "Warning", "Failed", reason)
 		c.logger.Error(err, "Addon install workflow failed.")
-		instance.Status.Reason = reason
-		fmt.Printf("\n addon %s/%s install failed %v \n", instance.Namespace, instance.Name, err)
+		addon.Status.Reason = reason
 		return err
 	}
 
@@ -215,12 +267,12 @@ func (c *Controller) validateSecrets(ctx context.Context, addon *addonv1.Addon) 
 	return nil
 }
 
-func (c *Controller) addAddonToCache(instance *addonv1.Addon) {
+func (c *Controller) addAddonToCache(addon *addonv1.Addon) {
 	var version = addoninternal.Version{
-		Name:        instance.GetName(),
-		Namespace:   instance.GetNamespace(),
-		PackageSpec: instance.GetPackageSpec(),
-		PkgPhase:    instance.GetInstallStatus(),
+		Name:        addon.GetName(),
+		Namespace:   addon.GetNamespace(),
+		PackageSpec: addon.GetPackageSpec(),
+		PkgPhase:    addon.GetInstallStatus(),
 	}
 	c.versionCache.AddVersion(version)
 	c.logger.Info("Adding version cache", "phase ", version.PkgPhase)
@@ -252,10 +304,10 @@ func (c *Controller) runWorkflow(lifecycleStep addonv1.LifecycleStep, addon *add
 }
 
 // Calculates new checksum and validates if there is a diff
-func (c *Controller) validateChecksum(instance *addonv1.Addon) (bool, string) {
-	newCheckSum := instance.CalculateChecksum()
+func (c *Controller) validateChecksum(addon *addonv1.Addon) (bool, string) {
+	newCheckSum := addon.CalculateChecksum()
 
-	if instance.Status.Checksum == newCheckSum {
+	if addon.Status.Checksum == newCheckSum {
 		return false, newCheckSum
 	}
 
@@ -270,7 +322,7 @@ func (c *Controller) SetFinalizer(ctx context.Context, addon *addonv1.Addon, fin
 		if !common.ContainsString(addon.ObjectMeta.Finalizers, finalizerName) {
 			// Set Finalizer
 			addon.ObjectMeta.Finalizers = append(addon.ObjectMeta.Finalizers, finalizerName)
-			if err := c.updateAddon(addon); err != nil {
+			if err := c.updateAddon(ctx, addon); err != nil {
 				panic(err)
 			}
 		}
@@ -279,13 +331,45 @@ func (c *Controller) SetFinalizer(ctx context.Context, addon *addonv1.Addon, fin
 	return nil
 }
 
-func (c *Controller) updateAddon(addon *addonv1.Addon) error {
-	_, err := c.addoncli.AddonmgrV1alpha1().Addons(addon.Namespace).Update(context.Background(), addon,
+func (c *Controller) updateAddon(ctx context.Context, addon *addonv1.Addon) error {
+	_, err := c.addoncli.AddonmgrV1alpha1().Addons(addon.Namespace).Update(ctx, addon,
 		metav1.UpdateOptions{})
 	if err != nil {
 		msg := fmt.Sprintf("Failed updating addon %s/%s . %v", addon.Namespace, addon.Name, err)
 		fmt.Print(msg)
 		return fmt.Errorf(msg)
 	}
+	return nil
+}
+
+// Finalize runs finalizer for addon
+func (c *Controller) Finalize(ctx context.Context, addon *addonv1.Addon, wfl workflows.AddonLifecycle, finalizerName string) error {
+	// Has Delete workflow defined, let's run it.
+	var removeFinalizer = true
+
+	if addon.Spec.Lifecycle.Delete.Template != "" {
+		removeFinalizer = false
+		// Run delete workflow
+		phase, err := c.runWorkflow(addonv1.Delete, addon, wfl)
+		if err != nil {
+			return err
+		}
+
+		if phase == addonv1.Succeeded || phase == addonv1.Failed {
+			removeFinalizer = true
+		}
+	}
+
+	// Remove version from cache
+	c.versionCache.RemoveVersion(addon.Spec.PkgName, addon.Spec.PkgVersion)
+
+	// Remove finalizer from the list and update it.
+	if removeFinalizer && common.ContainsString(addon.ObjectMeta.Finalizers, finalizerName) {
+		addon.ObjectMeta.Finalizers = common.RemoveString(addon.ObjectMeta.Finalizers, finalizerName)
+		if err := c.updateAddon(ctx, addon); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
