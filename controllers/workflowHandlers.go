@@ -39,14 +39,7 @@ func (c *Controller) handleWorkFlowUpdate(ctx context.Context, obj interface{}) 
 		return fmt.Errorf(msg)
 	}
 
-	err = c.updateAddonStatus(wfobj.GetNamespace(), addonName, lifecycle, wfobj.Status.Phase)
-	if err != nil {
-		msg := fmt.Sprintf("\n### error failed updating %s status err %#v\n", addonName, err)
-		c.logger.Info(msg)
-		return fmt.Errorf(msg)
-	}
-
-	return nil
+	return c.updateAddonStatusLifecycle(ctx, wfobj.GetNamespace(), addonName, lifecycle, wfobj.Status.Phase)
 }
 
 func (c *Controller) handleWorkFlowAdd(ctx context.Context, obj interface{}) error {
@@ -75,14 +68,7 @@ func (c *Controller) handleWorkFlowAdd(ctx context.Context, obj interface{}) err
 		return fmt.Errorf(msg)
 	}
 
-	err = c.updateAddonStatus(wfobj.GetNamespace(), addonName, lifecycle, wfobj.Status.Phase)
-	if err != nil {
-		msg := fmt.Sprintf("\n### error failed updating %s status err %#v\n", addonName, err)
-		c.logger.Info(msg)
-		return fmt.Errorf(msg)
-	}
-
-	return nil
+	return c.updateAddonStatusLifecycle(ctx, wfobj.GetNamespace(), addonName, lifecycle, wfobj.Status.Phase)
 }
 
 func (c *Controller) handleWorkFlowDelete(ctx context.Context, newEvent Event) error {
