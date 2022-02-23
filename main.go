@@ -17,11 +17,10 @@ package main
 import (
 	"flag"
 
+	"github.com/keikoproj/addon-manager/controllers"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-
-	"github.com/keikoproj/addon-manager/controllers"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -42,18 +41,6 @@ func init() {
 
 func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(debug)))
-
-	// cfg, _ := utils.BuildOutOfClusterConfig()
-
-	// clientset, err := kubernetes.NewForConfig(cfg)
-	// if err != nil {
-	// 	logrus.Fatalf("Can not create kubernetes client: %v", err)
-	// }
-
-	// dynCli, err := dynamic.NewForConfig(cfg)
-	// if err != nil {
-	// 	panic(err)
-	// }
 
 	controllers.Start()
 }

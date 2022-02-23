@@ -34,6 +34,9 @@ import (
 
 	wfclientset "github.com/argoproj/argo-workflows/v3/pkg/client/clientset/versioned"
 	addoninternal "github.com/keikoproj/addon-manager/pkg/addon"
+	batch_v1 "k8s.io/api/batch/v1"
+
+	rbac_v1 "k8s.io/api/rbac/v1"
 )
 
 const maxRetries = 5
@@ -58,6 +61,13 @@ type Controller struct {
 	nsinformer         cache.SharedIndexInformer
 	deploymentinformer cache.SharedIndexInformer
 
+	srvinformer                cache.SharedIndexInformer
+	configMapinformer          cache.SharedIndexInformer
+	clusterRoleinformer        cache.SharedIndexInformer
+	clusterRoleBindingInformer cache.SharedIndexInformer
+	jobinformer                cache.SharedIndexInformer
+	srvAcntinformer            cache.SharedIndexInformer
+
 	dynCli   dynamic.Interface
 	addoncli addonv1versioned.Interface
 	wfcli    wfclientset.Interface
@@ -72,7 +82,6 @@ type Controller struct {
 
 // Start prepares watchers and run their controllers, then waits for process termination signals
 func Start() {
-
 	var kubeClient kubernetes.Interface
 	var cfg *rest.Config
 	cfg, err := rest.InClusterConfig()
@@ -146,7 +155,105 @@ func Start() {
 		cache.Indexers{},
 	)
 
-	c := newResourceController(kubeClient, dynCli, addoncli, wfcli, informer, wfinformer, nsinformer, deploymentinformer, "addon", "addon-manager-system")
+	srvinformer := cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
+				return kubeClient.CoreV1().Services("").List(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
+				return kubeClient.CoreV1().Services("").Watch(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+		},
+		&v1.Service{},
+		0, //Skip resync
+		cache.Indexers{},
+	)
+
+	configMapinformer := cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
+				return kubeClient.CoreV1().ConfigMaps("").List(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
+				return kubeClient.CoreV1().ConfigMaps("").Watch(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+		},
+		&v1.ConfigMap{},
+		0, //Skip resync
+		cache.Indexers{},
+	)
+
+	clusterRoleinformer := cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
+				return kubeClient.RbacV1().ClusterRoles().List(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
+				return kubeClient.RbacV1().ClusterRoles().Watch(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+		},
+		&rbac_v1.ClusterRole{},
+		0, //Skip resync
+		cache.Indexers{},
+	)
+
+	clusterRoleBindingInformer := cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
+				return kubeClient.RbacV1().ClusterRoleBindings().List(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
+				return kubeClient.RbacV1().ClusterRoleBindings().Watch(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+		},
+		&rbac_v1.ClusterRoleBinding{},
+		0, //Skip resync
+		cache.Indexers{},
+	)
+
+	srvAcntinformer := cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
+				return kubeClient.CoreV1().ServiceAccounts(namespace).List(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
+				return kubeClient.CoreV1().ServiceAccounts(namespace).Watch(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+		},
+		&v1.ServiceAccount{},
+		0, //Skip resync
+		cache.Indexers{},
+	)
+
+	jobinformer := cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
+				return kubeClient.BatchV1().Jobs(namespace).List(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
+				return kubeClient.BatchV1().Jobs(namespace).Watch(ctx, meta_v1.ListOptions{
+					LabelSelector: ResourcetweakListOptions()})
+			},
+		},
+		&batch_v1.Job{},
+		0, //Skip resync
+		cache.Indexers{},
+	)
+
+	c := newResourceController(kubeClient, dynCli, addoncli, wfcli, informer, wfinformer, nsinformer, deploymentinformer,
+		srvinformer, configMapinformer, clusterRoleinformer, clusterRoleBindingInformer, jobinformer, srvAcntinformer,
+		"addon", "addon-manager-system")
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
@@ -158,7 +265,7 @@ func Start() {
 	<-sigterm
 }
 
-func newResourceController(kubeClient kubernetes.Interface, dynCli dynamic.Interface, addoncli addonv1versioned.Interface, wfcli wfclientset.Interface, informer, wfinformer, nsinformer, deploymentinformer cache.SharedIndexInformer, resourceType, namespace string) *Controller {
+func newResourceController(kubeClient kubernetes.Interface, dynCli dynamic.Interface, addoncli addonv1versioned.Interface, wfcli wfclientset.Interface, informer, wfinformer, nsinformer, deploymentinformer, srvinformer, configMapinformer, clusterRoleinformer, clusterRoleBindingInformer, jobinformer, srvAcntinformer cache.SharedIndexInformer, resourceType, namespace string) *Controller {
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 	var newEvent Event
 	var err error
@@ -195,14 +302,23 @@ func newResourceController(kubeClient kubernetes.Interface, dynCli dynamic.Inter
 	})
 
 	return &Controller{
-		logger:             logrus.WithField("controllers", "-"+resourceType),
-		clientset:          kubeClient,
-		dynCli:             dynCli,
-		addoncli:           addoncli,
-		wfcli:              wfcli,
-		informer:           informer,
-		wfinformer:         wfinformer,
-		nsinformer:         nsinformer,
+		logger:     logrus.WithField("controllers", "-"+resourceType),
+		clientset:  kubeClient,
+		dynCli:     dynCli,
+		addoncli:   addoncli,
+		wfcli:      wfcli,
+		informer:   informer,
+		wfinformer: wfinformer,
+		nsinformer: nsinformer,
+
+		srvAcntinformer:            srvAcntinformer,
+		configMapinformer:          configMapinformer,
+		clusterRoleinformer:        clusterRoleinformer,
+		clusterRoleBindingInformer: clusterRoleBindingInformer,
+
+		jobinformer: jobinformer,
+		srvinformer: srvinformer,
+
 		queue:              queue,
 		deploymentinformer: deploymentinformer,
 		namespace:          namespace,
@@ -291,6 +407,107 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 			c.handleDeploymentDeletion(ctx, obj)
 		},
 	})
+
+	resourceType = "ServiceAccount"
+	c.srvAcntinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
+			newEvent.eventType = "create"
+
+			logrus.WithField("controllers", "ServiceAccount").Infof("Processing add to %v: %s", resourceType, newEvent.key)
+			c.handleServiceAccountAdd(ctx, obj)
+
+		},
+		UpdateFunc: func(old, new interface{}) {
+			newEvent.key, err = cache.MetaNamespaceKeyFunc(old)
+			newEvent.eventType = "update"
+
+			logrus.WithField("controllers", "ServiceAccount").Infof("Processing update to %v: %s", resourceType, newEvent.key)
+			c.handleServiceAccountUpdate(ctx, new)
+
+		},
+		DeleteFunc: func(obj interface{}) {
+			newEvent.key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+			newEvent.eventType = "delete"
+			c.handleServiceAccountDeletion(ctx, obj)
+		},
+	})
+
+	resourceType = "ConfigMap"
+	c.srvAcntinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
+			newEvent.eventType = "create"
+
+			logrus.WithField("controllers", "ConfigMap").Infof("Processing add to %v: %s", resourceType, newEvent.key)
+			c.handleConfigMapAdd(ctx, obj)
+
+		},
+		UpdateFunc: func(old, new interface{}) {
+			newEvent.key, err = cache.MetaNamespaceKeyFunc(old)
+			newEvent.eventType = "update"
+
+			logrus.WithField("controllers", "ConfigMap").Infof("Processing update to %v: %s", resourceType, newEvent.key)
+			c.handleConfigMapUpdate(ctx, new)
+
+		},
+		DeleteFunc: func(obj interface{}) {
+			newEvent.key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+			newEvent.eventType = "delete"
+			c.handleConfigMapDeletion(ctx, obj)
+		},
+	})
+
+	resourceType = "ClusterRole"
+	c.clusterRoleinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
+			newEvent.eventType = "create"
+
+			logrus.WithField("controllers", "ClusterRole").Infof("Processing add to %v: %s", resourceType, newEvent.key)
+			c.handleClusterRoleAdd(ctx, obj)
+
+		},
+		UpdateFunc: func(old, new interface{}) {
+			newEvent.key, err = cache.MetaNamespaceKeyFunc(old)
+			newEvent.eventType = "update"
+
+			logrus.WithField("controllers", "ClusterRole").Infof("Processing update to %v: %s", resourceType, newEvent.key)
+			c.handleClusterRoleUpdate(ctx, new)
+
+		},
+		DeleteFunc: func(obj interface{}) {
+			newEvent.key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+			newEvent.eventType = "delete"
+			c.handleClusterRoleDeletion(ctx, obj)
+		},
+	})
+
+	resourceType = "ClusterRoleBinding"
+	c.clusterRoleBindingInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
+			newEvent.eventType = "create"
+
+			logrus.WithField("controllers", "ClusterRoleBinding").Infof("Processing add to %v: %s", resourceType, newEvent.key)
+			c.handleClusterRoleBindingAdd(ctx, obj)
+
+		},
+		UpdateFunc: func(old, new interface{}) {
+			newEvent.key, err = cache.MetaNamespaceKeyFunc(old)
+			newEvent.eventType = "update"
+
+			logrus.WithField("controllers", "ClusterRoleBinding").Infof("Processing update to %v: %s", resourceType, newEvent.key)
+			c.handleClusterRoleBindingUpdate(ctx, new)
+
+		},
+		DeleteFunc: func(obj interface{}) {
+			newEvent.key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+			newEvent.eventType = "delete"
+			c.handleClusterRoleBindingDeletion(ctx, obj)
+		},
+	})
+
 	fmt.Print(err)
 }
 
@@ -314,6 +531,11 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	go c.wfinformer.Run(stopCh)
 	go c.nsinformer.Run(stopCh)
 	go c.deploymentinformer.Run(stopCh)
+	go c.srvAcntinformer.Run(stopCh)
+	go c.configMapinformer.Run(stopCh)
+	go c.clusterRoleinformer.Run(stopCh)
+	go c.clusterRoleBindingInformer.Run(stopCh)
+	go c.jobinformer.Run(stopCh)
 
 	if !cache.WaitForCacheSync(stopCh, c.HasSynced, c.wfinformer.HasSynced) {
 		utilruntime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
