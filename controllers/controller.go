@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sync"
@@ -64,6 +63,7 @@ type WfInformers struct {
 	apiclientset   addonv1versioned.Interface //addon api client
 	addonlister    addonv1listers.AddonLister //addon lister
 	addonInformers cache.SharedIndexInformer  // addon dynamic informer
+
 }
 
 func NewWfInformers(nsInfo cache.SharedIndexInformer, stopCh <-chan struct{}, log logr.Logger, k8scli client.Client, dynClient dynamic.Interface) *WfInformers {
@@ -207,6 +207,16 @@ func InstanceIDRequirement(instanceID string) labels.Requirement {
 	return *instanceIDReq
 }
 
+func ResourcetweakListOptions() string {
+	req, _ := labels.NewRequirement(addon.ResourceDefaultManageByLabel, selection.Equals, []string{addon.ResourceDefaultManageByValue})
+	return labels.NewSelector().Add(*req).String()
+
+}
+
+func tweakListOptions(options *metav1.ListOptions) {
+	// currently, I do not have any label
+}
+
 // dedicated workflow add/update event handler
 func (wfinfo *WfInformers) handleWorkFlowUpdate(obj interface{}, informers v1alpha1.WorkflowInformer) {
 	if err := addonwfutility.IsValidV1WorkFlow(obj); err != nil {
@@ -340,36 +350,9 @@ func (wfinfo *WfInformers) delAddon(namespace, name string) error {
 	return nil
 }
 
-func WorkFlowFromUnstructured(un *unstructured.Unstructured) (*wfv1.Workflow, error) {
-	var wf wfv1.Workflow
-	err := FromUnstructuredObj(un, &wf)
-	return &wf, err
-}
-
-func FromUnstructured(un *unstructured.Unstructured) (*addonv1.Addon, error) {
-	var addon addonv1.Addon
-	err := FromUnstructuredObj(un, &addon)
-	return &addon, err
-}
-
-func FromUnstructuredObj(un *unstructured.Unstructured, v interface{}) error {
-	err := runtime.DefaultUnstructuredConverter.FromUnstructured(un.Object, v)
-	if err != nil {
-		if err.Error() == "cannot convert int64 to v1alpha1.AnyString" {
-			data, err := json.Marshal(un)
-			if err != nil {
-				return err
-			}
-			return json.Unmarshal(data, v)
-		}
-		return err
-	}
-	return nil
-}
-
 const defaultSpamBurst = 10000
 
-func CreateEventRecorder(namespace string, ks8cli kubernetes.Interface, logger *logrus.Entry) record.EventRecorder {
+func createEventRecorder(namespace string, ks8cli kubernetes.Interface, logger *logrus.Entry) record.EventRecorder {
 	eventCorrelationOption := record.CorrelatorOptions{BurstSize: defaultSpamBurst}
 	eventBroadcaster := record.NewBroadcasterWithCorrelatorOptions(eventCorrelationOption)
 	eventBroadcaster.StartLogging(logger.Debugf)
