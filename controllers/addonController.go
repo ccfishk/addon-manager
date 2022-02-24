@@ -35,6 +35,7 @@ import (
 	wfclientset "github.com/argoproj/argo-workflows/v3/pkg/client/clientset/versioned"
 	addoninternal "github.com/keikoproj/addon-manager/pkg/addon"
 	batch_v1 "k8s.io/api/batch/v1"
+	batch_v1beta1 "k8s.io/api/batch/v1beta1"
 
 	rbac_v1 "k8s.io/api/rbac/v1"
 )
@@ -257,15 +258,15 @@ func Start(namespace string) {
 	cronjobinformer := cache.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
-				return kubeClient.BatchV1().CronJobs(namespace).List(ctx, meta_v1.ListOptions{
+				return kubeClient.BatchV1beta1().CronJobs(namespace).List(ctx, meta_v1.ListOptions{
 					LabelSelector: ResourcetweakListOptions()})
 			},
 			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
-				return kubeClient.BatchV1().CronJobs(namespace).Watch(ctx, meta_v1.ListOptions{
+				return kubeClient.BatchV1beta1().CronJobs(namespace).Watch(ctx, meta_v1.ListOptions{
 					LabelSelector: ResourcetweakListOptions()})
 			},
 		},
-		&batch_v1.CronJob{},
+		&batch_v1beta1.CronJob{},
 		0, //Skip resync
 		cache.Indexers{},
 	)
@@ -577,7 +578,7 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 	})
 
 	resourceType = "Job"
-	c.clusterRoleBindingInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	c.jobinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
 			newEvent.eventType = "create"
@@ -596,7 +597,7 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 	})
 
 	resourceType = "CronJob"
-	c.clusterRoleBindingInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	c.cronjobinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
 			newEvent.eventType = "create"
@@ -615,7 +616,7 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 	})
 
 	resourceType = "DaemonSet"
-	c.clusterRoleBindingInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	c.daemonSetinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
 			newEvent.eventType = "create"
@@ -634,7 +635,7 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 	})
 
 	resourceType = "ReplicaSet"
-	c.clusterRoleBindingInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	c.replicaSetinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
 			newEvent.eventType = "create"
@@ -653,7 +654,7 @@ func (c *Controller) setupresourcehandlers(ctx context.Context, nsinformer, depl
 	})
 
 	resourceType = "StatefulSet"
-	c.clusterRoleBindingInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	c.statefulSetinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			newEvent.key, err = cache.MetaNamespaceKeyFunc(obj)
 			newEvent.eventType = "create"
