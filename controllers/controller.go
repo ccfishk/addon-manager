@@ -34,7 +34,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -113,12 +112,7 @@ func (wfinfo *WfInformers) startAddonInformers(cfg *rest.Config) {
 }
 
 func (wfinfo *WfInformers) Start(ctx context.Context) error {
-	//cfg, err := common.InClusterConfig()
-	cfg, err := clientcmd.BuildConfigFromFlags("", "/Users/jiminh/.kube/config")
-	if cfg == nil {
-		panic(err)
-	}
-
+	cfg, _ := common.InClusterConfig()
 	addoncli := common.NewAddonClient(cfg)
 	if addoncli == nil {
 		return fmt.Errorf("failed to create addon client")

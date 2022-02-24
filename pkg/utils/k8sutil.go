@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/sirupsen/logrus"
@@ -32,7 +33,7 @@ func GetClient() kubernetes.Interface {
 func BuildOutOfClusterConfig() (*rest.Config, error) {
 	kubeconfigPath := os.Getenv("KUBECONFIG")
 	if kubeconfigPath == "" {
-		kubeconfigPath = "/Users/jiminh/.kube/config"
+		return nil, fmt.Errorf("did not find kubeconfig")
 	}
 	return clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 }
