@@ -399,9 +399,18 @@ func (p ApplicationAssemblyPhase) NotTriggered() bool {
 	}
 }
 
-func (p ApplicationAssemblyPhase) Completed() bool {
+func (p ApplicationAssemblyPhase) Succeeded() bool {
 	switch p {
 	case Succeeded:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p ApplicationAssemblyPhase) Completed() bool {
+	switch p {
+	case Succeeded, Failed, Error:
 		return true
 	default:
 		return false

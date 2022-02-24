@@ -70,19 +70,3 @@ func (c *Controller) handleWorkFlowAdd(ctx context.Context, obj interface{}) err
 
 	return c.updateAddonStatusLifecycle(ctx, wfobj.GetNamespace(), addonName, lifecycle, wfobj.Status.Phase)
 }
-
-func (c *Controller) handleWorkFlowDelete(ctx context.Context, newEvent Event) error {
-	key := newEvent.key
-	item, found, err := c.wfinformer.GetIndexer().GetByKey(newEvent.key)
-	if err != nil {
-		msg := fmt.Sprintf("retrieving wf %s err %v", key, err)
-		fmt.Print(msg)
-		return fmt.Errorf(msg)
-	} else if !found {
-		msg := fmt.Sprintf("failed finding %s err %v", key, err)
-		fmt.Print(msg)
-		return fmt.Errorf(msg)
-	}
-	_, _ = item.(*unstructured.Unstructured)
-	return nil
-}

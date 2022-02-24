@@ -41,6 +41,5 @@ func init() {
 
 func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(debug)))
-
-	controllers.Start()
+	controllers.Start("addon-manager-system")
 }

@@ -33,26 +33,27 @@ func (c *Controller) handleAddonCreation(ctx context.Context, addon *addonv1.Add
 func (c *Controller) handleAddonUpdate(ctx context.Context, addon *addonv1.Addon) error {
 	c.logger.Info("updating addon ", addon.Namespace, "/", addon.Name)
 
-	if !addon.ObjectMeta.DeletionTimestamp.IsZero() {
+	if !addon.ObjectMeta.DeletionTimestamp.IsZero() && addon.Status.Lifecycle.Installed != addonv1.Deleting {
 		var wfl = workflows.NewWorkflowLifecycle(c.wfcli, c.informer, c.dynCli, addon, c.scheme, c.recorder)
 
-		err := c.Finalize(ctx, addon, wfl, addonapiv1.FinalizerName)
+		err := c.Finalize(ctx, addon, wfl)
 		if err != nil {
 			reason := fmt.Sprintf("Addon %s/%s could not be finalized. err %v", addon.Namespace, addon.Name, err)
 			c.recorder.Event(addon, "Warning", "Failed", reason)
 			addon.Status.Lifecycle.Installed = addonv1.DeleteFailed
 			addon.Status.Reason = reason
 			c.logger.Error(reason)
-			return fmt.Errorf(reason)
-		}
-
-		// For a better user experience we want to update the status and requeue
-		if addon.Status.Lifecycle.Installed != addonv1.Deleting {
-			addon.Status.Lifecycle.Installed = addonv1.Deleting
 			if err := c.updateAddonStatus(ctx, addon); err != nil {
-				c.logger.Error("failed updating ", addon.Namespace, "/", addon.Name, " deleting status ", err)
+				c.logger.Error("failed updating ", addon.Namespace, "/", addon.Name, " finalizing status ", err)
 				return err
 			}
+			return nil
+		}
+
+		addon.Status.Lifecycle.Installed = addonv1.Deleting
+		if err := c.updateAddonStatus(ctx, addon); err != nil {
+			c.logger.Error("failed updating ", addon.Namespace, "/", addon.Name, " deleting status ", err)
+			return err
 		}
 	}
 
@@ -80,20 +81,21 @@ func (c *Controller) handleAddonDeletion(ctx context.Context, addon *addonv1.Add
 	if !addon.ObjectMeta.DeletionTimestamp.IsZero() {
 		var wfl = workflows.NewWorkflowLifecycle(c.wfcli, c.informer, c.dynCli, addon, c.scheme, c.recorder)
 
-		err := c.Finalize(ctx, addon, wfl, addonapiv1.FinalizerName)
+		err := c.Finalize(ctx, addon, wfl)
 		if err != nil {
 			reason := fmt.Sprintf("Addon %s/%s could not be finalized. %v", addon.Namespace, addon.Name, err)
 			c.recorder.Event(addon, "Warning", "Failed", reason)
 			addon.Status.Lifecycle.Installed = addonv1.DeleteFailed
 			addon.Status.Reason = reason
-			c.logger.Error(err, "Failed to finalize addon.")
-			return fmt.Errorf(reason)
+			if err := c.updateAddonStatus(ctx, addon); err != nil {
+				c.logger.Error("failed updating ", addon.Namespace, "/", addon.Name, " finalizing failure ", err)
+				return err
+			}
 		}
 
 		// For a better user experience we want to update the status and requeue
 		if addon.Status.Lifecycle.Installed != addonv1.Deleting {
 			addon.Status.Lifecycle.Installed = addonv1.Deleting
-
 			if err := c.updateAddonStatus(ctx, addon); err != nil {
 				c.logger.Error("failed updating ", addon.Namespace, "/", addon.Name, " deleting status ", err)
 				return err
@@ -270,34 +272,22 @@ func (c *Controller) SetFinalizer(ctx context.Context, addon *addonv1.Addon, fin
 }
 
 // Finalize runs finalizer for addon
-func (c *Controller) Finalize(ctx context.Context, addon *addonv1.Addon, wfl workflows.AddonLifecycle, finalizerName string) error {
-	// Has Delete workflow defined, let's run it.
-	var removeFinalizer = true
+func (c *Controller) Finalize(ctx context.Context, addon *addonv1.Addon, wfl workflows.AddonLifecycle) error {
 
 	if addon.Spec.Lifecycle.Delete.Template != "" {
-		removeFinalizer = false
-		// Run delete workflow
-		phase, err := c.runWorkflow(addonv1.Delete, addon, wfl)
+		_, err := c.runWorkflow(addonv1.Delete, addon, wfl)
 		if err != nil {
 			return err
-		}
-
-		if phase == addonv1.Succeeded || phase == addonv1.Failed {
-			removeFinalizer = true
 		}
 	}
 
 	// Remove version from cache
 	c.versionCache.RemoveVersion(addon.Spec.PkgName, addon.Spec.PkgVersion)
-
-	// Remove finalizer from the list and update it.
-	if removeFinalizer && common.ContainsString(addon.ObjectMeta.Finalizers, finalizerName) {
-		addon.ObjectMeta.Finalizers = common.RemoveString(addon.ObjectMeta.Finalizers, finalizerName)
-		if err := c.updateAddon(ctx, addon); err != nil {
-			c.logger.Error("failed removing addon %s/%s finalizer, err %#v", err)
-			return err
-		}
-	}
-
 	return nil
+}
+
+func (c *Controller) removeFinalizer(addon *addonv1.Addon) {
+	if common.ContainsString(addon.ObjectMeta.Finalizers, addonapiv1.FinalizerName) {
+		addon.ObjectMeta.Finalizers = common.RemoveString(addon.ObjectMeta.Finalizers, addonapiv1.FinalizerName)
+	}
 }
