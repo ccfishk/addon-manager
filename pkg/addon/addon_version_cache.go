@@ -17,6 +17,8 @@ package addon
 import (
 	"sync"
 
+	"fmt"
+
 	"github.com/Masterminds/semver/v3"
 	addonmgrv1alpha1 "github.com/keikoproj/addon-manager/api/addon/v1alpha1"
 )
@@ -24,6 +26,7 @@ import (
 // VersionCacheClient interface clients must implement for addon version cache.
 type VersionCacheClient interface {
 	AddVersion(Version)
+	UpdateVersion(Version)
 	GetVersions(pkgName string) map[string]Version
 	GetVersion(pkgName, pkgVersion string) *Version
 	HasVersionName(name string) (bool, *Version)
@@ -62,6 +65,27 @@ func (c *cached) AddVersion(v Version) {
 		c.addons[v.PkgName] = mm
 	}
 	c.addons[v.PkgName][v.PkgVersion] = v
+}
+
+func (c *cached) UpdateVersion(v Version) {
+	c.Lock()
+	defer c.Unlock()
+
+	for addonName, addonVersion := range c.addons {
+		for aversion, versionDesc := range addonVersion {
+			if versionDesc.PkgPhase == addonmgrv1alpha1.ValidationFailed {
+				for depName, depVersion := range versionDesc.PkgDeps {
+					if v.PkgName == depName && (v.PkgVersion == depVersion || depVersion == "*") {
+						fmt.Printf("addon %s deps %s:%s needs update validation status",
+							addonName, depName, depVersion)
+						needsUpdate := c.addons[addonName][aversion]
+						needsUpdate.PkgPhase = addonmgrv1alpha1.Succeeded
+						c.addons[addonName][aversion] = needsUpdate
+					}
+				}
+			}
+		}
+	}
 }
 
 func (c *cached) GetVersions(pkgName string) map[string]Version {

@@ -454,6 +454,13 @@ func (r *AddonReconciler) addAddonToCache(log logr.Logger, instance *addonmgrv1a
 	}
 	r.versionCache.AddVersion(version)
 	log.Info("Adding version cache", "phase", version.PkgPhase)
+
+	if version.PkgPhase == addonmgrv1alpha1.Succeeded {
+		log.Info("Update existing version cache", "using addon ", version.PkgName)
+		fmt.Printf("\n %v \n", version)
+		// update the addon dep status which depends on this newly reconciled addon
+		r.versionCache.UpdateVersion(version)
+	}
 }
 
 func (r *AddonReconciler) executePrereqAndInstall(ctx context.Context, log logr.Logger, instance *addonmgrv1alpha1.Addon, wfl workflows.AddonLifecycle) error {
